@@ -152,7 +152,8 @@ export async function saveMovements(movements: Movement[], by: string) {
   await batch.commit()
 }
 
-const KINDS: MovementKind[] = ['create', 'buy', 'use', 'check', 'finish', 'edit', 'delete', 'restore', 'hamper']
+// Debe incluir todos los tipos de MovementKind: el que falte se descarta al leer el historial de Firestore.
+const KINDS: MovementKind[] = ['create', 'buy', 'use', 'check', 'finish', 'discard', 'edit', 'delete', 'restore', 'hamper', 'loan']
 
 /** Escucha en vivo los últimos movimientos (el historial unificado). */
 export function subscribeHistory(onData: (entries: HistoryEntry[]) => void, onError: OnError, max = 200): () => void {
