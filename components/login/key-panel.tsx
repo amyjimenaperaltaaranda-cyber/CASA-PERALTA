@@ -1,9 +1,9 @@
 'use client'
 
 import { AnimatePresence, motion } from 'framer-motion'
-import { ArrowLeft, Delete, LoaderCircle } from 'lucide-react'
+import { ArrowLeft, Delete } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
-import { AuthError, checkPin, hasPin, savePin, signInAdminWithGoogle } from '@/lib/auth'
+import { checkPin, hasPin, savePin } from '@/lib/auth'
 import { family, type FamilyMember } from '@/lib/inventory'
 
 const PIN_LENGTH = 4
@@ -21,7 +21,6 @@ type KeyPanelProps = {
   onBack: () => void
 }
 
-const admin = family.find((member) => member.access === 'admin')!
 const members = family.filter((member) => member.access === 'member')
 
 export function KeyPanel({ onSuccess, onBack }: KeyPanelProps) {
@@ -63,19 +62,6 @@ export function KeyPanel({ onSuccess, onBack }: KeyPanelProps) {
     } catch {
       setMessage('No pude consultar tu PIN. Revisa la conexión.')
     } finally {
-      setBusy(false)
-    }
-  }
-
-  const google = async () => {
-    setBusy(true)
-    setMessage(null)
-    try {
-      await signInAdminWithGoogle()
-      onSuccess(admin)
-    } catch (error) {
-      if (error instanceof AuthError && error.code === 'cancelled') setMessage(null)
-      else setMessage(error instanceof AuthError ? error.message : 'No se pudo iniciar sesión con Google.')
       setBusy(false)
     }
   }
@@ -198,16 +184,6 @@ export function KeyPanel({ onSuccess, onBack }: KeyPanelProps) {
               <p className="text-[10px] font-medium uppercase tracking-[0.32em] text-amber-100/70">Bienvenidos a</p>
               <h2 className="font-serif text-[34px] leading-none">{title}</h2>
               <div className="my-1 h-px w-24 bg-amber-100/30" />
-              <p className="text-[11px] uppercase tracking-[0.2em] text-amber-100/70">Administradora</p>
-              <button
-                type="button"
-                onClick={google}
-                disabled={busy}
-                className="flex items-center gap-2.5 rounded-full bg-white px-4 py-2 text-[13px] font-medium text-stone-800 shadow-[0_4px_14px_rgba(0,0,0,0.35)] outline-none transition hover:bg-amber-50 focus-visible:ring-2 focus-visible:ring-amber-200 disabled:opacity-60"
-              >
-                {busy ? <LoaderCircle aria-hidden className="size-4 animate-spin" /> : <GoogleMark />}
-                Entrar con Google
-              </button>
             </motion.div>
           ) : (
             <motion.div key="bow-pin" className="flex flex-col items-center gap-2" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
@@ -315,16 +291,5 @@ function KeyCap({
     >
       {children ?? label}
     </motion.button>
-  )
-}
-
-function GoogleMark() {
-  return (
-    <svg aria-hidden viewBox="0 0 48 48" className="size-4">
-      <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.9 6.1C12.4 13.6 17.7 9.5 24 9.5z" />
-      <path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.5 5.8c4.4-4.1 7.1-10.1 7.1-17.5z" />
-      <path fill="#FBBC05" d="M10.5 28.7c-.5-1.5-.8-3.1-.8-4.7s.3-3.2.8-4.7l-7.9-6.1C.9 16.4 0 20.1 0 24s.9 7.6 2.6 10.8l7.9-6.1z" />
-      <path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.5-5.8c-2.1 1.4-4.8 2.3-8.4 2.3-6.3 0-11.6-4.1-13.5-9.8l-7.9 6.1C6.5 42.6 14.6 48 24 48z" />
-    </svg>
   )
 }

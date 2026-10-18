@@ -141,7 +141,7 @@ function Door({ rect, bounds, hinge, open, src }: { rect: Rect; bounds: Rect; hi
 
   return (
     <motion.div
-      className="absolute top-0 h-full [transform-style:preserve-3d]"
+      className="absolute top-0 h-full [backface-visibility:hidden] [will-change:transform]"
       style={{
         left: `${localLeft}%`,
         width: `${localWidth}%`,

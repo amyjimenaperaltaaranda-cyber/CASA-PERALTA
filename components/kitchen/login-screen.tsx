@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useGame } from '@/components/game/game-provider'
 import { LeafArt, WallArt } from '@/components/login/door-art'
 import { DOOR_CENTER, DOORBELL, HANDLE_RECT, KEYHOLE, LEAF_RECT, MAILBOX, W, ZOOM_SCALE } from '@/components/login/door-layout'
+import { EntrancePlants } from '@/components/login/entrance-plants'
 import { KeyPanel } from '@/components/login/key-panel'
 import type { FamilyMember } from '@/lib/inventory'
 import { rectStyle, SCENE_IMAGE } from '@/lib/scene'
@@ -59,6 +60,11 @@ export function LoginScreen() {
     setPhase('opening1')
   }, [])
   const onBack = useCallback(() => setPhase('leaving'), [])
+  // La llave secreta se usa sin acercarse a la cerradura: la cámara ya está en reposo, así que se pasa directo a abrir la puerta.
+  const onAdminSuccess = useCallback((member: FamilyMember) => {
+    pending.current = member
+    setPhase('opening2')
+  }, [])
 
   const idle = phase === 'idle'
   const open = phase === 'opening2'
@@ -137,6 +143,8 @@ export function LoginScreen() {
           className="absolute cursor-pointer rounded-lg outline-none transition hover:bg-white/10 focus-visible:ring-2 focus-visible:ring-amber-200"
           style={rectStyle(DOORBELL)}
         />
+
+        <EntrancePlants enabled={idle} onCaption={setCaption} onAdminSuccess={onAdminSuccess} />
       </motion.div>
 
       {/* captions */}

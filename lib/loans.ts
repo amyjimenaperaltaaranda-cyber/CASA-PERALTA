@@ -7,10 +7,10 @@ import type { Movement } from './lots'
 export type LoanableDef = { id: string; name: string }
 
 export const loanableDefs: LoanableDef[] = [
-  { id: 'paraguas-morado', name: 'Paraguas morado' },
+  { id: 'paraguas-plegable', name: 'Paraguas amarillo plegable' },
   { id: 'paraguas-azul', name: 'Paraguas azul' },
-  { id: 'paraguas-rayas', name: 'Paraguas de rayas azul y blanco' },
-  { id: 'paraguas-plegable', name: 'Paraguas plegable negro con puntos amarillos' },
+  { id: 'paraguas-morado', name: 'Paraguas morado' },
+  { id: 'paraguas-rayas', name: 'Paraguas azul con rayas blancas' },
 ]
 export const loanableDef = (id: string) => loanableDefs.find((entry) => entry.id === id)
 

@@ -29,8 +29,8 @@ const BATH_ZOOMS: View[] = ['zoomed_cabinet', 'zoomed_shelf', 'zoomed_paper', 'z
 export const mainOf = (view: View): 'main_kitchen' | 'main_bathroom' => (view === 'main_bathroom' || BATH_ZOOMS.includes(view) ? 'main_bathroom' : 'main_kitchen')
 
 export const MAIN_HOTSPOTS: Record<ZoomView, { rect: Rect; label: string; shape: string }> = {
-  zoomed_fridge: { rect: { x: 3.8, y: 20.2, w: 22.6, h: 66 }, label: 'Abrir la refrigeradora', shape: 'rounded-lg' },
-  zoomed_pantry: { rect: { x: 75.4, y: 10.2, w: 20.1, h: 76 }, label: 'Abrir la alacena', shape: 'rounded-lg' },
+  zoomed_fridge: { rect: { x: 2.2, y: 15, w: 19.4, h: 64.6 }, label: 'Abrir la refrigeradora', shape: 'rounded-lg' },
+  zoomed_pantry: { rect: { x: 75.4, y: 9.3, w: 20.1, h: 70 }, label: 'Abrir la alacena', shape: 'rounded-lg' },
   zoomed_fruit: { rect: { x: 43.6, y: 50.5, w: 14.2, h: 15.5 }, label: 'Acercarse al frutero', shape: 'rounded-[40%]' },
   zoomed_pets: { rect: { x: 1, y: 74, w: 30, h: 24.5 }, label: 'Ir a la estación de Monchi y Mandy', shape: 'rounded-2xl' },
   // El congelador se abre desde el interior de la refrigeradora (no es clicable en la escena principal)
@@ -92,19 +92,21 @@ export const CLEAN_DOORS: [Rect, Rect] = [
   { x: 76.1, y: 10.6, w: 8.7, h: 21.4 },
 ]
 
-/** Doors of the two tall cabinets, in percent of the main scene. */
+/** Doors of the two tall cabinets, in percent of the main scene (medidas sobre los bordes reales de kitchen.png, 1679×937). */
 export const FRIDGE_DOORS: [Rect, Rect] = [
-  { x: 3.8, y: 20.2, w: 9.2, h: 43 },
-  { x: 13.1, y: 20.2, w: 9.8, h: 43 },
+  { x: 2.44, y: 15.47, w: 9, h: 40.45 }, // px 41→192, 145→524
+  { x: 11.44, y: 15.47, w: 9.65, h: 40.45 }, // px 192→354
 ]
 export const PANTRY_DOORS: [Rect, Rect] = [
-  { x: 77.55, y: 13, w: 8.93, h: 70.3 },
-  { x: 86.48, y: 13, w: 8.69, h: 70.3 },
+  { x: 78.26, y: 9.82, w: 8.22, h: 66.06 }, // px 1314→1452, 92→711
+  { x: 86.48, y: 9.82, w: 8.22, h: 66.06 }, // px 1452→1590
 ]
 
 export const FRUIT_BOWL: Rect = MAIN_HOTSPOTS.zoomed_fruit.rect
-export const LAMP_ORIGIN: Point = { x: 50, y: 23.5 }
+export const LAMP_ORIGIN: Point = { x: 48.84, y: 11.1 } // boca de la pantalla de la lámpara, px (820, 104)
 export const PETS_STATION: Rect = MAIN_HOTSPOTS.zoomed_pets.rect
+/** Paragüero de mimbre junto a la alacena (cesta + mangos de los paraguas), px 1147→1265, 505→917 de kitchen.png. */
+export const UMBRELLA_STAND: Rect = { x: 68.3, y: 53.9, w: 7.05, h: 44 }
 
 /** Paints the part of the main scene image that sits under `rect` (used for doors that swing open). */
 export const sceneSliceStyle = ({ x, y, w, h }: Rect, src: string = SCENE_IMAGE): CSSProperties => ({

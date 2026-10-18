@@ -14,6 +14,7 @@ import { ActionCaption, InventoryHud, PlayerBadge } from './hud'
 import { PetStation } from './pet-station'
 import { LaundryAlert } from '@/components/laundry/laundry-alert'
 import { RoomSwitch } from './room-switch'
+import { UmbrellaPanel } from './umbrella-panel'
 
 export function MainView() {
   const { state, dispatch } = useGame()
@@ -47,7 +48,6 @@ export function MainView() {
         interiorRatio={768 / 1376}
         lightColor="rgba(255,210,150,0.9)"
         cardTitle="Alacena"
-        fit="contain"
         cardStyle={{ right: '22%', top: '16%' }}
         active={hover === 'zoomed_pantry'}
         onHover={setHover}
@@ -55,6 +55,7 @@ export function MainView() {
       />
       <FruitBowlHotspot active={hover === 'zoomed_fruit'} onHover={setHover} onOpen={open} />
       <PetStation active={hover === 'zoomed_pets'} onHover={setHover} onOpen={open} />
+      <UmbrellaPanel />
 
       <motion.button
         type="button"
