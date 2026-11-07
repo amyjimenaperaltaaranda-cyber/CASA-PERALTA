@@ -2,11 +2,11 @@
 
 import { createContext, type Dispatch, type ReactNode, useCallback, useContext, useEffect, useMemo, useReducer, useRef } from 'react'
 import { ensureSession } from '@/lib/auth'
-import { dayKey, msUntilMidnight, type RemoteFeeding, saveCatalogChange, saveFeeding, saveHamper, saveLots, saveMovements, subscribeFeeding, subscribeHampers, subscribeHistory, subscribeLots, subscribeProducts } from '@/lib/db'
+import { dayKey, msUntilMidnight, type RemoteFeeding, saveCatalogChange, saveFeeding, saveHamper, saveLots, saveMovements, saveSettings, subscribeFeeding, subscribeHampers, subscribeHistory, subscribeLots, subscribeProducts, subscribeSettings } from '@/lib/db'
 import { firebaseConfigured } from '@/lib/firebase'
 import { type FamilyMember, feedingKey } from '@/lib/inventory'
-import { type Article, syncCustomArticles } from '@/lib/catalog'
-import { applyProductAction, isProductAction, type ProductAction } from '@/lib/products'
+import { type Article, type ProductSettings, syncCustomArticles } from '@/lib/catalog'
+import { applyProductAction, applySettings, isProductAction, type ProductAction, type SettingsAction } from '@/lib/products'
 import { applyHamper, type Hamper, type HamperAction, seedHampers } from '@/lib/hampers'
 import { applyLoan, type Loan, type LoanAction, seedLoans } from '@/lib/loans'
 import { applyLotAction, type HistoryEntry, isLotAction, type Lot, type LotAction, seedLots, toHistory } from '@/lib/lots'
@@ -33,6 +33,8 @@ type GameState = {
   hampers: Hamper[]
   /** Objetos que se prestan y vuelven (por ahora, los paraguas). Solo local: no se sincroniza con Firebase todavía. */
   loans: Loan[]
+  /** Medidas de cocina y frascos que la familia ajustó, por producto. */
+  settings: Record<string, ProductSettings>
   /** Día actual en hora de Lima (YYYY-MM-DD); cambia a medianoche. */
   today: string
   feeding: Record<string, FeedingEntry>
@@ -49,6 +51,8 @@ type GameAction =
   | HamperAction
   | LoanAction
   | ProductAction
+  | SettingsAction
+  | { type: 'hydrateSettings'; settings: Record<string, ProductSettings> }
   | { type: 'openNewProduct'; shelfId?: string; name?: string }
   | { type: 'closeNewProduct' }
   | { type: 'hydrateProducts'; products: Article[] }
@@ -73,6 +77,7 @@ const initialState: GameState = {
   history: [],
   hampers: [],
   loans: seedLoans(),
+  settings: {},
   today: '',
   feeding: { [feedingKey('Monchi', 'Mañana')]: { by: 'Jorge', at: '07:30' } },
   toast: null,
@@ -96,6 +101,8 @@ function reducer(state: GameState, action: GameAction): GameState {
       return { ...state, view: action.view, lastZoom: null }
     case 'buy':
     case 'use':
+    case 'transfer':
+    case 'cook':
     case 'check':
     case 'finish':
     case 'discard':
@@ -131,6 +138,17 @@ function reducer(state: GameState, action: GameAction): GameState {
         toast: outcome.message ? withToast(state, outcome.message) : state.toast,
       }
     }
+    case 'setProductSettings': {
+      const outcome = applySettings(state.settings, action)
+      return {
+        ...state,
+        settings: outcome.settings,
+        history: [...toHistory(outcome.movements, actor(state)), ...state.history].slice(0, 300),
+        toast: outcome.message ? withToast(state, outcome.message) : state.toast,
+      }
+    }
+    case 'hydrateSettings':
+      return { ...state, settings: action.settings }
     case 'openNewProduct':
       return { ...state, newProduct: { shelfId: action.shelfId, name: action.name } }
     case 'closeNewProduct':
@@ -214,6 +232,9 @@ export function GameProvider({ children }: { children: ReactNode }) {
       } else if (isLotAction(action)) {
         const outcome = applyLotAction(current.lots, action, { today: current.today, by, trash: current.trash })
         saveLots(outcome.changed, outcome.movements, by).catch(reportError)
+      } else if (action.type === 'setProductSettings') {
+        const outcome = applySettings(current.settings, action)
+        if (outcome.movements.length) saveSettings(action.articleId, action.settings, outcome.movements, by).catch(reportError)
       } else if (action.type === 'hamper') {
         const outcome = applyHamper(current.hampers, action, { today: current.today, by })
         if (outcome.changed) saveHamper(outcome.changed, by).catch(reportError)
@@ -241,6 +262,12 @@ export function GameProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!loggedIn) return
     return subscribeProducts((products) => rawDispatch({ type: 'hydrateProducts', products }), reportError)
+  }, [loggedIn, reportError])
+
+  // Medidas de cocina y frascos en vivo.
+  useEffect(() => {
+    if (!loggedIn) return
+    return subscribeSettings((settings) => rawDispatch({ type: 'hydrateSettings', settings }), reportError)
   }, [loggedIn, reportError])
 
   // Historial unificado en vivo.

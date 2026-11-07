@@ -1,4 +1,4 @@
-import { type Article, articleById, articles, articlesOf, formatAmount, formatGrams, parOf, type Shelf, shelves } from './catalog'
+import { type Article, articleById, articles, articlesOf, type Container, formatAmount, formatGrams, parOf, type Shelf, shelves } from './catalog'
 import { addDays, daysBetween, formatDayShort } from './days'
 import { fruitStatus, RIPENESS } from './fruit'
 
@@ -6,7 +6,8 @@ import { fruitStatus, RIPENESS } from './fruit'
    Lo que se usa sale primero del lote que vence antes (FEFO). Cada vez que alguien usa algo o revisa cuánto queda,
    el lote guarda una "observación"; con ellas la app aprende el ritmo de consumo y proyecta cuándo se acaba. */
 
-export type Check = { at: string; amount: number }
+/** Observación de cuánto quedaba un día. `kind` marca bajadas que NO son consumo (trasvase al frasco, descarte). */
+export type Check = { at: string; amount: number; kind?: 'transfer' | 'discard' }
 
 export type Lot = {
   id: string
@@ -29,6 +30,8 @@ export type Lot = {
   deletedAt: string | null
   /** Madurez (solo frutas): puntuación medida el día `at`. */
   ripe: { score: number; at: string } | null
+  /** Lote del que se llenó este (el frasco que sale del costal). */
+  parentLotId?: string | null
 }
 
 /** Cambios que se pueden hacer a mano sobre un lote para partir de valores reales. */
@@ -40,9 +43,18 @@ export type EditPatch = {
   ripeScore?: number
 }
 
+/** De dónde vino un registro de consumo. */
+export type UseSource = 'manual' | 'cocina' | 'receta' | 'voz' | 'ia'
+/** Lo que dijo la persona, además de la cantidad en unidad base: «3» + «taza» (+ «570 g»). */
+export type UseInput = { qty?: number; measureId?: string; label?: string; source?: UseSource }
+export type CookItem = { articleId: string; amount: number } & UseInput
+
 export type LotAction =
   | { type: 'buy'; articleId: string; lotId: string; amount: number; kg: number | null; expiresInDays: number | null; boughtAt?: string; ripeScore?: number }
-  | { type: 'use'; articleId: string; amount: number }
+  | ({ type: 'use'; articleId: string; amount: number } & UseInput)
+  /** Rellenar el frasco desde el lote grande. `leftover` = lo que aún quedaba en el frasco (0 = estaba vacío). */
+  | { type: 'transfer'; articleId: string; lotId: string; container: Container; leftover?: number }
+  | { type: 'cook'; items: CookItem[]; note?: string }
   | { type: 'check'; articleId: string; fraction: number; lotId?: string }
   | { type: 'finish'; lotId: string }
   | { type: 'discard'; lotId: string }
@@ -51,13 +63,13 @@ export type LotAction =
   | { type: 'restore'; lotId: string }
   | { type: 'ripe'; articleId: string; score: number }
 
-export type MovementKind = 'create' | 'buy' | 'use' | 'check' | 'finish' | 'discard' | 'edit' | 'delete' | 'restore' | 'hamper' | 'loan'
-export type Movement = { articleId: string; lotId: string; kind: MovementKind; amount: number; detail?: string }
+export type MovementKind = 'create' | 'buy' | 'use' | 'check' | 'transfer' | 'finish' | 'discard' | 'edit' | 'delete' | 'restore' | 'hamper' | 'loan'
+export type Movement = { articleId: string; lotId: string; kind: MovementKind; amount: number; detail?: string; qty?: number; measureId?: string; source?: UseSource }
 
 /** Movimiento guardado en el historial unificado (nunca se borra ni se edita). */
 export type HistoryEntry = Movement & { id: string; at: string; by: string }
 
-export const isLotAction = (action: { type: string }): action is LotAction => ['buy', 'use', 'check', 'finish', 'discard', 'edit', 'delete', 'restore', 'ripe'].includes(action.type)
+export const isLotAction = (action: { type: string }): action is LotAction => ['buy', 'use', 'transfer', 'cook', 'check', 'finish', 'discard', 'edit', 'delete', 'restore', 'ripe'].includes(action.type)
 
 const round3 = (value: number) => Math.round(value * 1000) / 1000
 const EPOCH = '2000-01-01'
@@ -65,9 +77,13 @@ const FAR = '9999-12-31'
 
 /* ------------------------------ orden y estados ------------------------------ */
 
-const fefo = (a: Lot, b: Lot) => (a.expiresAt ?? FAR).localeCompare(b.expiresAt ?? FAR) || a.boughtAt.localeCompare(b.boughtAt) || a.id.localeCompare(b.id)
+// FEFO; a igual vencimiento, sigue el lote ya abierto antes que uno cerrado, y luego el más antiguo.
+const fefo = (a: Lot, b: Lot) =>
+  (a.expiresAt ?? FAR).localeCompare(b.expiresAt ?? FAR) || Number(a.openedAt === null) - Number(b.openedAt === null) || a.boughtAt.localeCompare(b.boughtAt) || a.id.localeCompare(b.id)
+/** Orden de uso: primero lo que ya está en el frasco, luego lo que vence antes (FEFO). */
+const useOrder = (a: Lot, b: Lot) => Number(!!b.parentLotId) - Number(!!a.parentLotId) || fefo(a, b)
 
-export const activeLots = (lots: Lot[], articleId: string) => lots.filter((lot) => lot.articleId === articleId && lot.closedAt === null).sort(fefo)
+export const activeLots = (lots: Lot[], articleId: string) => lots.filter((lot) => lot.articleId === articleId && lot.closedAt === null).sort(useOrder)
 
 export type ExpiryState = { tone: 'none' | 'ok' | 'soon' | 'expired'; days: number | null; label: string }
 
@@ -84,29 +100,97 @@ export function expiryOf(lot: Lot, article: Article, today: string): ExpiryState
 
 /* ------------------------------ ritmo de consumo ------------------------------ */
 
-/** Ritmo aprendido (unidad base por día): lo consumido entre observaciones reales / días observados. */
-export function learnRate(articleLots: Lot[], today: string, windowDays = 90): number | null {
-  const recent = articleLots.filter((lot) => lot.checks.length > 0 && daysBetween(lot.checks[lot.checks.length - 1].at, today) <= windowDays)
-  let consumed = 0
-  const spans: [number, number][] = []
-  for (const lot of recent) {
-    const first = lot.checks[0]
-    const last = lot.checks[lot.checks.length - 1]
-    consumed += Math.max(0, first.amount - last.amount)
-    spans.push([daysBetween(EPOCH, first.at), daysBetween(EPOCH, last.at)])
-  }
-  spans.sort((a, b) => a[0] - b[0])
-  let coverage = 0
-  let current: [number, number] | null = null
-  for (const span of spans) {
-    if (current && span[0] <= current[1]) current[1] = Math.max(current[1], span[1])
-    else {
-      if (current) coverage += current[1] - current[0]
-      current = [span[0], span[1]]
+/* El consumo se reconstruye día a día a partir de las observaciones de cada lote: lo que bajó entre dos observaciones
+   se reparte en los días que pasaron entre ellas. Las bajadas marcadas (trasvase al frasco, descarte) no son consumo
+   y sus días no cuentan como observados. Con eso:
+   - el ritmo pesa más lo reciente (vida media de 14 días), así un cambio de hábito se nota en pocas semanas;
+   - con 4 semanas o más de datos se aprende un factor por día de la semana (el domingo se cocina más). */
+
+const HALF_LIFE = 14
+const WINDOW = 90
+const weekdayOf = (day: string) => new Date(`${day}T00:00:00Z`).getUTCDay()
+
+export type Pattern = {
+  /** Unidad base por día, ponderando más lo reciente. */
+  rate: number
+  /** Factor por día de la semana (0 = domingo … 6 = sábado); 1 si aún no hay datos suficientes. */
+  weekday: number[]
+  /** Días con datos reales en la ventana. */
+  days: number
+}
+
+const FLAT = [1, 1, 1, 1, 1, 1, 1]
+
+/** Consumo diario observado en la ventana: día → cantidad, solo días cubiertos por alguna observación. */
+export function dailyUse(articleLots: Lot[], today: string, windowDays = WINDOW): Map<string, number> {
+  const from = addDays(today, -windowDays)
+  const series = new Map<string, number>()
+  for (const lot of articleLots) {
+    for (let index = 1; index < lot.checks.length; index++) {
+      const prev = lot.checks[index - 1]
+      const cur = lot.checks[index]
+      if (cur.at < from || cur.kind) continue
+      // Mientras el lote estuvo cerrado no se consumió de él: la bajada empieza el día en que se abrió.
+      const start = lot.openedAt && lot.openedAt > prev.at && lot.openedAt <= cur.at ? addDays(lot.openedAt, -1) : prev.at
+      const span = Math.max(0, daysBetween(start, cur.at))
+      const drop = Math.max(0, prev.amount - cur.amount)
+      // Una observación el mismo día cubre ese día; si no, la bajada se reparte en los días transcurridos.
+      const days = span === 0 ? [cur.at] : Array.from({ length: span }, (_, step) => addDays(start, step + 1))
+      for (const day of days) {
+        if (day < from || day > today) continue
+        series.set(day, (series.get(day) ?? 0) + drop / days.length)
+      }
     }
   }
-  if (current) coverage += current[1] - current[0]
-  return coverage >= 3 ? consumed / coverage : null
+  return series
+}
+
+/** Ritmo y patrón semanal aprendidos de observaciones reales; `null` mientras haya menos de 3 días con datos. */
+export function learnPattern(articleLots: Lot[], today: string, windowDays = WINDOW): Pattern | null {
+  const series = dailyUse(articleLots, today, windowDays)
+  if (series.size < 3) return null
+  let used = 0
+  let weight = 0
+  for (const [day, amount] of series) {
+    const w = 0.5 ** (Math.max(0, daysBetween(day, today)) / HALF_LIFE)
+    used += w * amount
+    weight += w
+  }
+  const rate = used / weight
+  let weekday = FLAT
+  if (series.size >= 28 && rate > 0) {
+    const sums = [0, 0, 0, 0, 0, 0, 0]
+    const counts = [0, 0, 0, 0, 0, 0, 0]
+    let total = 0
+    for (const [day, amount] of series) {
+      sums[weekdayOf(day)] += amount
+      counts[weekdayOf(day)] += 1
+      total += amount
+    }
+    const mean = total / series.size
+    if (counts.every((count) => count >= 3) && mean > 0) {
+      weekday = sums.map((sum, index) => Math.min(2.5, Math.max(0.4, sum / counts[index] / mean)))
+    }
+  }
+  return { rate, weekday, days: series.size }
+}
+
+/** Ritmo aprendido (unidad base por día). Se mantiene por compatibilidad: es el `rate` de `learnPattern`. */
+export function learnRate(articleLots: Lot[], today: string, windowDays = WINDOW): number | null {
+  return learnPattern(articleLots, today, windowDays)?.rate ?? null
+}
+
+/** Días que alcanza `total` consumiendo `rate` × el factor de cada día de la semana, desde hoy. */
+export function projectDays(total: number, rate: number, weekday: number[], today: string): number {
+  if (rate <= 0) return Infinity
+  if (weekday.every((factor) => factor === 1)) return total / rate
+  let left = total
+  for (let day = 0; day < 3650; day++) {
+    const need = rate * weekday[weekdayOf(addDays(today, day))]
+    if (need >= left) return day + left / need
+    left -= need
+  }
+  return 3650
 }
 
 /** Piezas por kilo aprendidas de las últimas compras por kilo (promedio de las 3 más recientes). */
@@ -119,10 +203,32 @@ export function learnedPerKg(lots: Lot[], article: Article): number | null {
   return samples.length ? Math.round((samples.reduce((sum, value) => sum + value, 0) / samples.length) * 10) / 10 : null
 }
 
-/** Cantidad estimada hoy. En costales de uso diario baja sola entre revisiones; en el resto es la última confirmada. */
+/** Cantidad estimada hoy. En costales de uso diario baja sola durante los días completos sin ningún registro
+    (ni el día del último registro ni hoy, que aún puede anotarse); en el resto es la última confirmada.
+    Así, si la familia anota cada uso, la estimación no descuenta dos veces lo mismo. */
 export function estimate(lot: Lot, article: Article, rate: number | null, today: string) {
   if (!article.passive || !rate) return lot.amount
-  return Math.max(0, lot.amount - rate * Math.max(0, daysBetween(lot.checkedAt, today)))
+  return Math.max(0, lot.amount - rate * Math.max(0, daysBetween(lot.checkedAt, today) - 1))
+}
+
+/** Estimación de los lotes activos (en orden de uso): en los pasivos solo baja solo el lote que se está usando
+    (el frasco o el costal abierto), no los costales cerrados. */
+export function estimateAll(active: Lot[], article: Article, rate: number | null, today: string): number[] {
+  const inUse = active.findIndex((lot) => lot.openedAt !== null)
+  const current = inUse === -1 ? 0 : inUse
+  return active.map((lot, index) => (index === current ? estimate(lot, article, rate, today) : lot.amount))
+}
+
+/** Frasco más reciente de un producto: cuándo se llenó por última vez y cuántos días duró el llenado anterior. */
+export function containerStatus(articleLots: Lot[]) {
+  const fills = articleLots
+    .filter((lot) => lot.parentLotId)
+    .flatMap((lot) => lot.checks.filter((check) => check.kind === 'transfer').map((check) => ({ lot, at: check.at })))
+    .sort((a, b) => a.at.localeCompare(b.at))
+  const last = fills[fills.length - 1]
+  if (!last) return null
+  const previous = fills.length >= 2 ? daysBetween(fills[fills.length - 2].at, last.at) : null
+  return { lot: last.lot, filledAt: last.at, lastedDays: previous }
 }
 
 /* ---------------------------------- resúmenes ---------------------------------- */
@@ -130,6 +236,8 @@ export function estimate(lot: Lot, article: Article, rate: number | null, today:
 export type ArticleSummary = {
   article: Article
   lots: Lot[]
+  /** Cantidad estimada de cada lote de `lots`, en el mismo orden. */
+  amounts: number[]
   total: number
   reference: number
   level: number
@@ -137,6 +245,8 @@ export type ArticleSummary = {
   learnedRate: number | null
   /** Ritmo usado para proyectar: el aprendido o, si no hay, el previsto. */
   rate: number | null
+  /** Factor por día de la semana usado en la proyección. */
+  weekday: number[]
   daysLeft: number | null
   runsOutOn: string | null
   nearest: { days: number; tone: ExpiryState['tone'] } | null
@@ -145,14 +255,17 @@ export type ArticleSummary = {
 
 export function summarize(article: Article, lots: Lot[], today: string): ArticleSummary {
   const own = lots.filter((lot) => lot.articleId === article.id)
-  const active = own.filter((lot) => lot.closedAt === null).sort(fefo)
-  const learnedRate = learnRate(own, today)
+  const active = own.filter((lot) => lot.closedAt === null).sort(useOrder)
+  const pattern = learnPattern(own, today)
+  const learnedRate = pattern?.rate ?? null
   const rate = learnedRate ?? article.plannedPerDay ?? null
-  const amounts = active.map((lot) => estimate(lot, article, rate, today))
+  const weekday = pattern?.weekday ?? FLAT
+  const amounts = estimateAll(active, article, rate, today)
   const total = round3(amounts.reduce((sum, value) => sum + value, 0))
-  const reference = Math.max(active.reduce((sum, lot) => sum + lot.initial, 0), parOf(article))
+  // El frasco sale del costal: su capacidad no suma a la referencia (sería contar dos veces lo mismo).
+  const reference = Math.max(active.reduce((sum, lot) => sum + (lot.parentLotId ? 0 : lot.initial), 0), parOf(article))
   const level = active.length === 0 ? 0 : Math.max(0, Math.min(100, Math.round((100 * total) / reference)))
-  const daysLeft = rate && rate > 0 && active.length > 0 ? total / rate : null
+  const daysLeft = rate && rate > 0 && active.length > 0 ? projectDays(total, rate, weekday, today) : null
   const dated = active.map((lot, index) => ({ lot, amount: amounts[index] })).filter((entry) => entry.lot.expiresAt !== null && entry.amount > 0)
   const states = dated.map((entry) => expiryOf(entry.lot, article, today)).filter((state) => state.days !== null)
   const worst = states.sort((a, b) => (a.days as number) - (b.days as number))[0]
@@ -160,11 +273,13 @@ export function summarize(article: Article, lots: Lot[], today: string): Article
   return {
     article,
     lots: active,
+    amounts,
     total,
     reference,
     level,
     learnedRate,
     rate,
+    weekday,
     daysLeft,
     // se acaba durante el día que resulta de sumar los días completos que alcanzan
     runsOutOn: daysLeft === null ? null : addDays(today, Math.floor(daysLeft)),
@@ -234,18 +349,28 @@ function open(lot: Lot, article: Article, today: string): Lot {
   return { ...lot, openedAt: today, expiresAt: lot.expiresAt === null || byOpening < lot.expiresAt ? byOpening : lot.expiresAt }
 }
 
-function record(lot: Lot, amount: number, today: string): Lot {
+/** Observaciones que se guardan dentro del lote; el historial completo queda en `movements`. */
+const MAX_CHECKS = 120
+
+function record(lot: Lot, amount: number, today: string, kind?: Check['kind']): Lot {
   const next = round3(Math.max(0, amount))
+  const check: Check = kind ? { at: today, amount: next, kind } : { at: today, amount: next }
   return {
     ...lot,
     amount: next,
     checkedAt: today,
-    checks: [...lot.checks, { at: today, amount: next }],
+    checks: [...lot.checks, check].slice(-MAX_CHECKS),
     closedAt: next <= 0.0005 ? today : null,
   }
 }
 
 const lower = (article: Article) => article.name.toLowerCase()
+
+/** «3 tazas de arroz», «500 g de harina», «4 huevos». */
+function spoken(article: Article, item: CookItem) {
+  if (item.label && item.measureId && item.measureId !== 'base') return `${item.label} de ${lower(article)}`
+  return article.tracking === 'measure' ? `${formatAmount(article, item.amount)} de ${lower(article)}` : formatAmount(article, item.amount)
+}
 
 export function applyLotAction(lots: Lot[], action: LotAction, ctx: { today: string; by: string; trash?: Lot[] }): Outcome {
   const { today, by } = ctx
@@ -299,7 +424,7 @@ export function applyLotAction(lots: Lot[], action: LotAction, ctx: { today: str
     const lot = lots.find((entry) => entry.id === action.lotId)
     const article = lot && articleById(lot.articleId)
     if (!lot || !article || lot.closedAt !== null) return untouched(lots, '')
-    const closed = record(open(lot, article, today), 0, today)
+    const closed = record(open(lot, article, today), 0, today, 'discard')
     return {
       lots: lots.map((entry) => (entry.id === lot.id ? closed : entry)),
       changed: [closed],
@@ -373,6 +498,98 @@ export function applyLotAction(lots: Lot[], action: LotAction, ctx: { today: str
     }
   }
 
+  if (action.type === 'cook') {
+    // Una cocinada: varios usos en un solo registro (y en un solo guardado).
+    let current = lots
+    const changed = new Map<string, Lot>()
+    const movements: Movement[] = []
+    const done: string[] = []
+    const missing: string[] = []
+    const note = action.note?.trim()
+    for (const item of action.items) {
+      const article = articleById(item.articleId)
+      if (!article || item.amount <= 0) continue
+      const out = applyLotAction(current, { ...item, type: 'use', source: item.source ?? 'cocina' }, ctx)
+      if (out.changed.length === 0) {
+        missing.push(article.name)
+        continue
+      }
+      current = out.lots
+      for (const lot of out.changed) changed.set(lot.id, lot)
+      movements.push(...out.movements.map((movement) => (note ? { ...movement, detail: [note, movement.detail].filter(Boolean).join(' · ') } : movement)))
+      done.push(spoken(article, item))
+    }
+    if (done.length === 0) return untouched(lots, missing.length ? `Sin stock registrado de ${missing.join(', ')}` : '')
+    return {
+      lots: current,
+      changed: [...changed.values()],
+      movements,
+      message: `${note ? `${note}: ` : 'Cocina registrada: '}${done.join(', ')}${missing.length ? ` · sin stock: ${missing.join(', ')}` : ''}`,
+    }
+  }
+
+  if (action.type === 'transfer') {
+    const article = articleById(action.articleId)
+    if (!article) return untouched(lots, '')
+    const active = activeLots(lots, article.id)
+    const jar = active.find((lot) => lot.parentLotId) ?? null
+    const sources = active.filter((lot) => !lot.parentLotId)
+    const capacity = action.container.amount
+    const name = action.container.label.toLowerCase()
+    // Sin un frasco abierto no puede «quedar» nada en él: lo contrario inventaría azúcar que no está en ningún lote.
+    const leftover = jar ? round3(Math.min(capacity, Math.max(0, action.leftover ?? 0))) : 0
+    const available = round3(sources.reduce((sum, lot) => sum + lot.amount, 0))
+    if (available <= 0.0005) return untouched(lots, `${article.name}: no queda en el costal para rellenar el ${name}. Anota la compra.`)
+    const moved = round3(Math.min(capacity - leftover, available))
+    if (moved <= 0.0005) return untouched(lots, `${article.name}: el ${name} ya está lleno`)
+
+    const changed: Lot[] = []
+    let remaining = moved
+    for (const source of sources) {
+      if (remaining <= 0.0005) break
+      const take = Math.min(source.amount, remaining)
+      changed.push(record(open(source, article, today), source.amount - take, today, 'transfer'))
+      remaining = round3(remaining - take)
+    }
+    const filled = round3(leftover + moved)
+    const status = containerStatus(lots.filter((lot) => lot.articleId === article.id))
+    let jarLot: Lot
+    if (jar) {
+      // Primero lo que quedaba (eso sí es consumo: enseña cuánto dura el frasco), luego el relleno.
+      const emptied = record(jar, leftover, today)
+      jarLot = { ...record(emptied, filled, today, 'transfer'), closedAt: null, initial: Math.max(jar.initial, filled) }
+    } else {
+      const expiresAt = sources.map((lot) => lot.expiresAt).filter((value): value is string => value !== null).sort()[0] ?? null
+      jarLot = {
+        id: action.lotId,
+        articleId: article.id,
+        boughtAt: today,
+        initial: filled,
+        amount: filled,
+        checkedAt: today,
+        checks: [{ at: today, amount: filled, kind: 'transfer' }],
+        expiresAt,
+        openedAt: today,
+        closedAt: null,
+        kg: null,
+        by,
+        deletedAt: null,
+        ripe: null,
+        parentLotId: sources[0].id,
+      }
+    }
+    changed.push(jarLot)
+    const byId = new Map(changed.map((lot) => [lot.id, lot]))
+    const nextLots = jar || lots.some((lot) => lot.id === jarLot.id) ? lots.map((entry) => byId.get(entry.id) ?? entry) : [...lots.map((entry) => byId.get(entry.id) ?? entry), jarLot]
+    const lasted = status ? daysBetween(status.filledAt, today) : null
+    return {
+      lots: nextLots,
+      changed,
+      movements: [{ articleId: article.id, lotId: jarLot.id, kind: 'transfer', amount: moved, detail: `${action.container.label} rellenado con ${formatAmount(article, moved)}${lasted ? ` · el anterior duró ${lasted} ${lasted === 1 ? 'día' : 'días'}` : ''}` }],
+      message: `${action.container.label} de ${lower(article)} rellenado (${formatAmount(article, moved)})${lasted ? ` · el anterior duró ${lasted} ${lasted === 1 ? 'día' : 'días'}` : ''}`,
+    }
+  }
+
   const article = articleById(action.articleId)
   if (!article) return untouched(lots, '')
   const active = activeLots(lots, article.id)
@@ -403,21 +620,34 @@ export function applyLotAction(lots: Lot[], action: LotAction, ctx: { today: str
     }
   }
 
-  // use: sale primero del lote que vence antes
+  // use: sale primero del frasco y luego del lote que vence antes
   let remaining = round3(action.amount)
   const changed: Lot[] = []
   const movements: Movement[] = []
-  for (const lot of active) {
+  const said = action.label ? `${action.label}${action.measureId && action.measureId !== 'base' ? ` (${formatAmount(article, action.amount)})` : ''}` : null
+  const extra = { ...(action.qty !== undefined ? { qty: action.qty } : {}), ...(action.measureId ? { measureId: action.measureId } : {}), ...(action.source ? { source: action.source } : {}) }
+  // En los productos que bajan solos (arroz, azúcar) se parte de lo estimado hoy, no de la última cantidad guardada:
+  // si no, registrar un uso «devolvería» todo lo que se consumió sin anotar desde la última revisión.
+  const pattern = article.passive ? learnPattern(lots.filter((lot) => lot.articleId === article.id), today) : null
+  const current = article.passive ? estimateAll(active, article, pattern?.rate ?? article.plannedPerDay ?? null, today) : active.map((lot) => lot.amount)
+  for (const [index, lot] of active.entries()) {
     if (remaining <= 0.0005) break
-    const take = Math.min(lot.amount, remaining)
-    const updated = record(open(lot, article, today), lot.amount - take, today)
+    const have = current[index]
+    if (have <= 0.0005) {
+      // Según el ritmo ya debería estar vacío: se cierra y se sigue con el siguiente lote.
+      changed.push(record(open(lot, article, today), 0, today))
+      continue
+    }
+    const take = Math.min(have, remaining)
+    const updated = record(open(lot, article, today), have - take, today)
     changed.push(updated)
-    movements.push({ articleId: article.id, lotId: lot.id, kind: 'use', amount: round3(take) })
+    // Lo que dijo la persona va en el primer movimiento; si se repartió entre lotes, los demás llevan solo la cantidad.
+    movements.push(movements.length === 0 && (said || action.source) ? { articleId: article.id, lotId: lot.id, kind: 'use', amount: round3(take), ...extra, ...(said ? { detail: `Usó ${said}` } : {}) } : { articleId: article.id, lotId: lot.id, kind: 'use', amount: round3(take) })
     remaining = round3(remaining - take)
   }
   const byId = new Map(changed.map((lot) => [lot.id, lot]))
   const left = round3(active.reduce((sum, lot) => sum + (byId.get(lot.id)?.amount ?? lot.amount), 0))
-  const used = formatAmount(article, round3(action.amount - Math.max(0, remaining)))
+  const used = remaining <= 0.0005 && said ? said : formatAmount(article, round3(action.amount - Math.max(0, remaining)))
   const message =
     remaining > 0.0005
       ? `${article.name}: solo había ${used} registrado. Revisa si falta anotar una compra.`

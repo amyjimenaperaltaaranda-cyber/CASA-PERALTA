@@ -1,15 +1,17 @@
 'use client'
 
 import { motion } from 'framer-motion'
-import { Pencil, Plus, X } from 'lucide-react'
+import { Pencil, Plus, Scale, X } from 'lucide-react'
 import { type CSSProperties, type ReactNode, useRef, useState } from 'react'
 import { useGame } from '@/components/game/game-provider'
 import { useDismiss } from '@/hooks/use-dismiss'
-import { type Article, articlesOf, buyAmount, formatAmount, type Shelf } from '@/lib/catalog'
+import { type Article, articlesOf, buyAmount, containerOf, formatAmount, measuresOf, type ProductSettings, type Shelf } from '@/lib/catalog'
 import { durationLabel, formatDay, formatDayShort } from '@/lib/days'
 import { levelColor, levelLabel } from '@/lib/inventory'
-import { type ArticleSummary, estimate, expiryOf, type Lot, type LotAction, learnedPerKg, summarize } from '@/lib/lots'
+import { type ArticleSummary, containerStatus, expiryOf, type Lot, type LotAction, learnedPerKg, summarize } from '@/lib/lots'
 import { LotEditor } from './lot-editor'
+import { MeasureEditor } from './measure-editor'
+import { entryFor, QuantityField, unitsOf, useQuantity } from './quantity'
 import { ProductEditor } from './product-editor'
 import { Chip, fieldClass, Group, Stepper } from './panel-parts'
 import { RIPENESS, RIPENESS_CHOICES } from '@/lib/fruit'
@@ -80,6 +82,7 @@ function FilledPanel({ shelf, placement, onClose, initialArticleId }: PanelProps
   const [articleId, setArticleId] = useState(options.some((entry) => entry.id === initialArticleId) ? (initialArticleId as string) : options[0].id)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editingProduct, setEditingProduct] = useState(false)
+  const [editingMeasures, setEditingMeasures] = useState(false)
   const [tab, setTab] = useState<'use' | 'buy'>('use')
   const article = options.find((entry) => entry.id === articleId) ?? options[0]
   const sum = summarize(article, state.lots, state.today)
@@ -107,6 +110,11 @@ function FilledPanel({ shelf, placement, onClose, initialArticleId }: PanelProps
             <p className="text-[0.6rem] font-medium uppercase tracking-[0.2em] text-hud-muted">{shelf.name}</p>
             <p className="font-serif text-lg leading-tight">{article.name}</p>
           </div>
+          {article.tracking === 'measure' && !editingProduct && !editingMeasures && (
+            <button type="button" onClick={() => setEditingMeasures(true)} aria-label="Medidas de la casa" title="Cuánto pesa tu taza, tu cucharada o tu frasco" className="-mt-1 grid size-6 shrink-0 place-items-center rounded-full text-hud-muted transition hover:bg-white/10 hover:text-hud-foreground">
+              <Scale className="size-3" />
+            </button>
+          )}
           {article.custom && !editingProduct && (
             <button type="button" onClick={() => setEditingProduct(true)} aria-label="Editar producto" title="Editar nombre o mueble del producto" className="-mt-1 grid size-6 shrink-0 place-items-center rounded-full text-hud-muted transition hover:bg-white/10 hover:text-hud-foreground">
               <Pencil className="size-3" />
@@ -128,6 +136,7 @@ function FilledPanel({ shelf, placement, onClose, initialArticleId }: PanelProps
                   onClick={() => {
                     setArticleId(entry.id)
                     setEditingId(null)
+                    setEditingMeasures(false)
                   }}
                 >
                   <span aria-hidden className="mr-1 inline-block size-1.5 rounded-full" style={{ backgroundColor: levelColor(level) }} />
@@ -149,6 +158,8 @@ function FilledPanel({ shelf, placement, onClose, initialArticleId }: PanelProps
 
         {editingProduct ? (
           <ProductEditor article={article} onClose={() => setEditingProduct(false)} />
+        ) : editingMeasures ? (
+          <MeasureEditor key={article.id} article={article} onClose={() => setEditingMeasures(false)} />
         ) : (
           <>
         <Status article={article} sum={sum} />
@@ -170,7 +181,7 @@ function FilledPanel({ shelf, placement, onClose, initialArticleId }: PanelProps
           ))}
         </div>
 
-        {tab === 'use' ? <UseForm article={article} sum={sum} act={act} /> : <BuyForm key={article.id} article={article} lots={state.lots} act={act} />}
+        {tab === 'use' ? <UseForm key={article.id} article={article} sum={sum} settings={state.settings[article.id]} lots={state.lots} act={act} /> : <BuyForm key={article.id} article={article} lots={state.lots} act={act} />}
 
         {sum.lots.length > 0 && <LotList article={article} sum={sum} today={state.today} act={act} onEdit={setEditingId} />}
           </>
@@ -212,24 +223,85 @@ function Status({ article, sum }: { article: Article; sum: ArticleSummary }) {
 
 /* -------------------------------------------------------------- usar / revisar */
 
-function UseForm({ article, sum, act }: { article: Article; sum: ArticleSummary; act: (action: LotAction) => void }) {
+function UseForm({ article, sum, settings, lots, act }: { article: Article; sum: ArticleSummary; settings?: ProductSettings; lots: Lot[]; act: (action: LotAction) => void }) {
+  const measures = measuresOf(article, settings)
+  const units = unitsOf(article, measures)
+  const quantity = useQuantity(units[0].id)
+  const container = containerOf(article, settings)
   if (sum.lots.length === 0) {
     return <p className="mt-3 text-xs text-hud-muted">Anota primero la compra en “Compré”.</p>
   }
+  const cup = measures[0]
+  // Botones rápidos: con una medida de cocina (taza), ¼ · ½ · 1 · 2 · 3 de esa medida; si no, los botones del catálogo.
+  const quick = cup && article.tracking === 'measure' ? [0.25, 0.5, 1, 2, 3].map((qty) => ({ key: `q${qty}`, qty, unit: cup })) : null
+  const unit = units.find((entry) => entry.id === quantity.unitId) ?? units[0]
+  const bulk = sum.lots.find((lot) => !lot.parentLotId)
+  const jar = container ? containerStatus(lots.filter((lot) => lot.articleId === article.id)) : null
+  const jarLot = jar && jar.lot.closedAt === null ? sum.lots.findIndex((lot) => lot.id === jar.lot.id) : -1
+
   return (
     <div className="mt-3 flex flex-col gap-3">
-      {!article.passive && article.use.length > 0 && (
+      {(quick || (!article.passive && article.use.length > 0)) && (
         <Group title="Usé">
-          {article.use.map((option) => (
-            <Chip key={option.id} onClick={() => act({ type: 'use', articleId: article.id, amount: option.amount })}>
-              {option.label}
-            </Chip>
-          ))}
+          {quick
+            ? quick.map((option) => (
+                <Chip key={option.key} onClick={() => act({ type: 'use', articleId: article.id, ...entryFor(article, option.qty, option.unit) })}>
+                  {entryFor(article, option.qty, option.unit).label}
+                </Chip>
+              ))
+            : article.use.map((option) => (
+                <Chip key={option.id} onClick={() => act({ type: 'use', articleId: article.id, amount: option.amount })}>
+                  {option.label}
+                </Chip>
+              ))}
         </Group>
       )}
+
+      <div>
+        <p className="mb-1 text-[0.6rem] font-medium uppercase tracking-[0.18em] text-hud-muted">Otra cantidad</p>
+        <div className="flex items-start gap-1.5">
+          <div className="min-w-0 flex-1">
+            <QuantityField article={article} units={units} qty={quantity.qty} unitId={unit.id} onChange={quantity.set} />
+          </div>
+          <button
+            type="button"
+            disabled={quantity.value <= 0}
+            onClick={() => act({ type: 'use', articleId: article.id, ...entryFor(article, quantity.value, unit) })}
+            className="shrink-0 rounded-lg bg-amber-200/25 px-3 py-1.5 text-xs font-medium ring-1 ring-amber-200/50 transition hover:bg-amber-200/35 disabled:opacity-40"
+          >
+            Usé
+          </button>
+        </div>
+      </div>
+
+      {container && (
+        <div className="rounded-lg bg-white/6 p-2">
+          <p className="text-xs">
+            {container.label} de {formatAmount(article, container.amount)}
+            {jarLot >= 0 ? <span className="text-hud-muted"> · quedan ~{formatAmount(article, sum.amounts[jarLot])}</span> : <span className="text-hud-muted"> · aún sin llenar</span>}
+          </p>
+          {jar?.lastedDays ? <p className="text-[0.66rem] text-hud-muted">El último llenado duró {jar.lastedDays} {jar.lastedDays === 1 ? 'día' : 'días'}.</p> : null}
+          {jarLot >= 0 && <p className="mb-1 mt-1.5 text-[0.6rem] font-medium uppercase tracking-[0.18em] text-hud-muted">Rellené el {container.label.toLowerCase()} · quedaba</p>}
+          <div className={`flex flex-wrap gap-1 ${jarLot >= 0 ? '' : 'mt-1.5'}`}>
+            {(jarLot >= 0
+              ? [
+                  { label: 'Nada', value: 0 },
+                  { label: '¼', value: 0.25 },
+                  { label: '½', value: 0.5 },
+                ]
+              : [{ label: `Llenar el ${container.label.toLowerCase()}`, value: 0 }]
+            ).map((option) => (
+              <Chip key={option.label} onClick={() => act({ type: 'transfer', articleId: article.id, lotId: crypto.randomUUID(), container, leftover: container.amount * option.value })}>
+                {option.label}
+              </Chip>
+            ))}
+          </div>
+        </div>
+      )}
+
       <Group title={article.passive ? 'Revisé el costal, queda' : 'Revisé, queda'}>
         {CHECKS.map((check) => (
-          <Chip key={check.label} onClick={() => act({ type: 'check', articleId: article.id, fraction: check.value })}>
+          <Chip key={check.label} onClick={() => act({ type: 'check', articleId: article.id, fraction: check.value, ...(bulk && article.passive ? { lotId: bulk.id } : {}) })}>
             {check.label}
           </Chip>
         ))}
@@ -243,7 +315,7 @@ function UseForm({ article, sum, act }: { article: Article; sum: ArticleSummary;
           ))}
         </Group>
       )}
-      {sum.lots.length > 1 && <p className="text-[0.66rem] text-hud-muted">Se aplica al lote que vence primero.</p>}
+      {sum.lots.length > 1 && <p className="text-[0.66rem] text-hud-muted">{container ? `Se usa primero lo del ${container.label.toLowerCase()}, luego el lote que vence primero.` : 'Se aplica al lote que vence primero.'}</p>}
     </div>
   )
 }
@@ -364,12 +436,13 @@ function LotList({ article, sum, today, act, onEdit }: { article: Article; sum: 
     <div className="mt-3 border-t border-white/10 pt-2">
       <p className="mb-1 text-[0.6rem] font-medium uppercase tracking-[0.18em] text-hud-muted">{sum.lots.length === 1 ? 'Lote' : `Lotes (${sum.lots.length})`}</p>
       <ul className="flex flex-col gap-1">
-        {sum.lots.slice(0, 6).map((lot) => {
+        {sum.lots.slice(0, 6).map((lot, index) => {
           const state = expiryOf(lot, article, today)
           return (
             <li key={lot.id} className="flex items-center justify-between gap-2 text-[0.7rem]">
               <span className="min-w-0 truncate">
-                {formatAmount(article, estimate(lot, article, sum.rate, today))}
+                {lot.parentLotId && <span className="mr-1 text-amber-200/90">Frasco ·</span>}
+                {formatAmount(article, sum.amounts[index])}
                 <span className="text-hud-muted"> · {formatDayShort(lot.boughtAt)}</span>
                 <span className={`ml-1 ${TONE[state.tone]}`}>· {state.label}</span>
                 {lot.by === 'Inicio' && <span className="ml-1 text-hud-warn">· aprox.</span>}

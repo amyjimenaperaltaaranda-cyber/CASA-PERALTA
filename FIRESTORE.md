@@ -6,6 +6,7 @@ La app **nunca borra** documentos de `lots` ni `movements`:
 - `movements` es el historial unificado (crear, editar, borrar, restaurar, uso, revisión, canastas). Solo se agrega.
 - `hampers` guarda el nivel de las canastas de ropa sucia.
 - `products` guarda los productos nuevos que crea la familia (con sus reglas ya copiadas). Quitar un producto solo pone `deletedAt`.
+- `productSettings` guarda las medidas de cocina (cuánto pesa la taza de la casa) y el frasco de cada producto.
 
 Agrega estas reglas a las que ya tienes (ajusta `isSignedIn()` a como identificas a la familia):
 
@@ -20,6 +21,10 @@ match /movements/{id} {
 }
 match /products/{id} {
   allow read, create, update: if request.auth != null;
+  allow delete: if false;
+}
+match /productSettings/{id} {
+  allow read, create, update: if request.auth != null;   // medidas de cocina y frasco de cada producto
   allow delete: if false;
 }
 match /hampers/{id} {

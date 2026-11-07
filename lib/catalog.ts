@@ -16,6 +16,13 @@ export type Expiry =
 export type BuyOption = { id: string; label: string; hint?: string; amount?: number; kg?: number }
 export type UseOption = { id: string; label: string; amount: number }
 
+/** Medida de cocina para ingresar cantidades («3 tazas»). `amount` = cuánto es una medida en la unidad base. */
+export type Measure = { id: string; label: [string, string]; amount: number }
+/** Recipiente de uso diario que se rellena desde el lote grande (el frasco del azúcar). `amount` = capacidad. */
+export type Container = { label: string; amount: number }
+/** Ajustes que la familia cambia sin tocar el código (colección `productSettings`). */
+export type ProductSettings = { measures?: Measure[]; container?: Container | null }
+
 export type Article = {
   id: string
   shelfId: string
@@ -38,6 +45,10 @@ export type Article = {
   ripenDays?: number
   /** Dos fases: días de vida una vez abierto. Vence lo que ocurra primero entre la fecha impresa y abierto + estos días. */
   openLife?: number
+  /** Medidas de cocina propias del producto (taza, cucharada…). Si no hay, se deducen de los botones de uso. */
+  measures?: Measure[]
+  /** Recipiente que se rellena desde el lote grande (p. ej. frasco de 2 tazas de azúcar). */
+  container?: Container
   /** Producto creado por el usuario (no viene en el catálogo del código). */
   custom?: boolean
   typeId?: string
@@ -75,6 +86,8 @@ const cups = (grams: number): UseOption[] =>
       ['3 tazas', 3],
     ] as const
   ).map(([label, count]) => ({ id: `c${count}`, label, amount: Math.round(grams * count) }))
+
+export const measure = (id: string, singular: string, plural: string, amount: number): Measure => ({ id, label: [singular, plural], amount })
 
 const kilo = (count: number): BuyOption => ({
   id: `kg${count}`,
@@ -253,7 +266,13 @@ export const articles: Article[] = [
   piece('cebolla-blanca', 'cebollas', 'Cebolla blanca', ['cebolla', 'cebollas'], { buy: [kilo(1), kilo(0.5), kilo(2)], use: whole(1, 2, 3), expiry: { kind: 'date', days: 30 }, perKg: 6, par: 6 }),
 
   grain('arroz', 'arroz', 'Arroz', 190, [bag('Costal 25 kg', 25000), bag('Bolsa 5 kg', 5000)], { passive: true, par: 25000 }),
-  grain('azucar', 'azucar', 'Azúcar', 200, [bag('Costal 10 kg', 10000), bag('Bolsa 1 kg', 1000)], { passive: true, par: 10000 }),
+  // El azúcar se usa desde un frasco de 2 tazas que se rellena del costal.
+  grain('azucar', 'azucar', 'Azúcar', 200, [bag('Costal 10 kg', 10000), bag('Bolsa 1 kg', 1000)], {
+    passive: true,
+    par: 10000,
+    measures: [measure('taza', 'taza', 'tazas', 200), measure('cda', 'cucharada', 'cucharadas', 12), measure('cdta', 'cucharadita', 'cucharaditas', 4)],
+    container: { label: 'Frasco', amount: 400 },
+  }),
 
   // Estación de mascotas (9 kg a 143 g/día ≈ 9 semanas)
   grain('croquetas', 'croquetas', 'Croquetas Michicat', 0, [bag('Costal 9 kg', 9000)], { passive: true, par: 9000, plannedPerDay: 143 }),
@@ -560,3 +579,31 @@ export function buyAmount(article: Article, option: BuyOption, perKg?: number | 
 
 /** Cantidad de referencia para la barra: lo que se compra normalmente. */
 export const parOf = (article: Article) => article.par ?? buyAmount(article, article.buy[0])
+
+/* ------------------------------------ medidas ------------------------------------ */
+
+/** Unidad base como medida: «g», «ml» o la pieza del producto. */
+export const baseMeasure = (article: Article): Measure => ({ id: 'base', label: article.unit, amount: 1 })
+
+/** Medidas de cocina del producto: los ajustes de la familia, las del catálogo o, si no hay, la taza de sus botones. */
+export function measuresOf(article: Article, settings?: ProductSettings): Measure[] {
+  if (settings?.measures?.length) return settings.measures
+  if (article.measures?.length) return article.measures
+  const cup = article.use.find((option) => option.id === 'c1')
+  return cup && cup.amount > 0 ? [measure('taza', 'taza', 'tazas', cup.amount)] : []
+}
+
+/** Recipiente de uso diario del producto (los ajustes pueden quitarlo con `null`). */
+export function containerOf(article: Article, settings?: ProductSettings): Container | null {
+  if (settings && settings.container !== undefined) return settings.container
+  return article.container ?? null
+}
+
+/** Convierte lo que dijo la persona («3 tazas») a la unidad base. */
+export function toBase(qty: number, unit: Measure) {
+  return Math.round(qty * unit.amount * 1000) / 1000
+}
+
+/** «3 tazas», «½ taza», «1 cucharada». */
+export const formatMeasure = (qty: number, unit: Measure) => `${formatQty(qty)} ${qty <= 1.04 ? unit.label[0] : unit.label[1]}`
+

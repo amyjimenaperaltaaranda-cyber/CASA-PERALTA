@@ -3,9 +3,10 @@
 import { Bath, Plus, Utensils } from 'lucide-react'
 import { useGame } from '@/components/game/game-provider'
 import { urgentHampers } from '@/lib/hampers'
+import { CookButton } from './cook-panel'
 import { ShoppingButton } from './shopping-list'
 
-/** Barra superior derecha: lista de compras + cambio de habitación (cocina ↔ baño). */
+/** Barra superior derecha: nuevo producto, «Cociné» (solo en la cocina), lista de compras y cambio de habitación. */
 export function RoomSwitch({ to }: { to: 'kitchen' | 'bathroom' }) {
   const { state, dispatch } = useGame()
   const Icon = to === 'bathroom' ? Bath : Utensils
@@ -22,6 +23,7 @@ export function RoomSwitch({ to }: { to: 'kitchen' | 'bathroom' }) {
         </span>
         Nuevo
       </button>
+      {to === 'bathroom' && <CookButton />}
       <ShoppingButton />
       <button
         type="button"

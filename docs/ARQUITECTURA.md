@@ -171,8 +171,9 @@ Cada mueble abre un **panel de registro** con las mismas cuatro acciones sobre l
 |---|---|---|
 | `users/{memberId}` | uno por integrante | `pinHash` (SHA-256 de `casa-peralta:{id}:{pin}`), `pinUpdatedAt` |
 | `products/{id}` | producto creado por la familia | copia completa de las reglas (`Article`), `deletedAt` |
-| `lots/{id}` | una compra | cantidades, fechas, `checks[]`, madurez, `deletedAt` |
-| `movements/{auto}` | un cambio | `articleId`, `lotId`, `kind`, `amount`, `detail`, `by`, `at`, `day`; solo se agrega |
+| `lots/{id}` | una compra | cantidades, fechas, `checks[]` (con `kind` en trasvases y descartes), madurez, `parentLotId` (frasco), `deletedAt` |
+| `movements/{auto}` | un cambio | `articleId`, `lotId`, `kind`, `amount`, `detail`, `qty`, `measureId`, `source`, `by`, `at`, `day`; solo se agrega |
+| `productSettings/{id}` | ajustes de un producto | `measures[]` (taza, cucharada…) y `container` (frasco), que la familia cambia sin tocar código |
 | `hampers/{id}` | canasta de ropa | nivel, ciclos de llenado |
 | `petTracker/{YYYY-MM-DD}` | un día | comidas de las gatas marcadas por turno |
 
@@ -338,10 +339,11 @@ erDiagram
 | Colección | Estado | Para qué |
 |---|---|---|
 | `users` | **ampliar** | Pasa a ser la lista de integrantes (hoy en código): nombre, rol, acceso, color, `active`. Lo administra Amy. |
-| `products` | **ampliar** | Guardar también el catálogo (sembrado desde `lib/catalog.ts`), con `measures`, `presentations` y `aliases`. |
-| `lots` | **ampliar** | `parentLotId` para trasvases (costal de azúcar → frasco). |
-| `movements` | **ampliar** | `qty`, `measureId`, `source`, `mealId`: qué dijo la persona y de dónde vino el registro. |
-| `stats/{productId}` | nueva | Caché del ritmo aprendido y del patrón semanal (se recalcula; no es fuente de verdad). |
+| `products` | **ampliar** | Guardar también el catálogo (sembrado desde `lib/catalog.ts`), con `presentations` y `aliases`. |
+| `productSettings` | ✅ hecho | Medidas de cocina y frasco por producto (en el diagrama: `MEASURE` y la capacidad del recipiente). |
+| `lots` | ✅ hecho | `parentLotId` para trasvases (costal de azúcar → frasco). |
+| `movements` | ✅ hecho · falta `mealId` | `qty`, `measureId`, `source`: qué dijo la persona y de dónde vino el registro. `mealId` llega con el plan de comidas. |
+| `stats/{productId}` | opcional | Caché del ritmo y del patrón semanal. Hoy se calcula al vuelo desde los lotes; solo hará falta si crece mucho el historial. |
 | `loans` | nueva | Persistir los paraguas, que hoy solo viven en memoria. |
 | `recipes`, `mealPlan` | nuevas | Recetas de la familia o de la IA y su programación en el calendario. |
 | `services`, `bills`, `billPayments` | nuevas | Pagos de agua, luz, gas e internet. |
@@ -363,36 +365,54 @@ erDiagram
 | Tomate | pieza | 1–4 | kilo (piezas por kilo aprendidas: `learnedPerKg`) |
 | Shampoo Sábila | ml | 10, 25, 50 ml | frasco 510 ml |
 
-Hoy las tazas están fijas dentro de los botones de uso (`cups(190)` en el catálogo). La estructura propuesta las
-vuelve **datos del producto** (`measures`), para que:
+Las medidas son **datos del producto** (`Measure`: `{ id, label, amount }`, en `lib/catalog.ts`):
 
-- la familia ajuste cuánto pesa *su* taza (y su frasco o jarra) sin tocar código;
-- el dictado y la IA entiendan «3 tazas de arroz» → `{ productId: 'arroz', qty: 3, measureId: 'taza' }` → 570 g;
-- las recetas guarden ingredientes en medidas de cocina y se descuenten en gramos.
+- `measuresOf(article, settings)` devuelve, en este orden, las medidas que ajustó la familia (`productSettings`), las
+  del catálogo (el azúcar trae taza, cucharada y cucharadita) o la taza deducida de sus botones de uso (arroz: 190 g);
+- en el panel de cada producto que se mide en gramos o mililitros, el botón ⚖ **Medidas de la casa** permite pesar
+  *su* taza y agregar otras (cucharada, vaso…), y definir el frasco que se rellena;
+- `toBase(qty, medida)` es la conversión única que usan los botones, la cantidad libre, «Cociné» y, más adelante, la
+  voz, la IA y las recetas: «3 tazas de arroz» → `{ qty: 3, measureId: 'taza' }` → 570 g.
 
-```ts
-// Conversión única, usada por botones, voz, IA y recetas
-const toBase = (product: Product, qty: number, measureId?: string) =>
-  measureId ? qty * (product.measures.find((m) => m.id === measureId)?.base ?? 1) : qty
-```
-
-**Trasvases.** El azúcar se compra en costal pero se usa desde un frasco de 2 tazas. Se modela como un movimiento
-`transfer`: el costal baja 400 g y nace un lote hijo («frasco», `parentLotId` = costal) con esos 400 g. Los usos se
-descuentan del frasco; cuando se vacía, la app sabe cuánto duró y propone rellenarlo.
+**Trasvases.** El azúcar se compra en costal pero se usa desde un frasco de 2 tazas. Al tocar **Rellené el frasco ·
+quedaba Nada / ¼ / ½** se registra un movimiento `transfer`: el costal baja lo que se pasó y el frasco (un lote hijo
+con `parentLotId` = costal) sube hasta su capacidad. Los usos salen primero del frasco. La bajada del costal no cuenta
+como consumo; lo que el frasco tenía al rellenarlo sí, y así la app aprende cuánto dura un frasco («el anterior duró
+8 días»). La capacidad del frasco no suma a la referencia de la barra, para no contar dos veces el mismo azúcar.
 
 ---
 
 ## 6. Consumo
 
-### Cómo funciona hoy
+### Cómo se registra
 
-- Cada **uso** o **revisión** agrega una observación (`checks`) al lote.
-- `learnRate()` calcula el ritmo: lo consumido entre la primera y la última observación de los lotes de los últimos
-  90 días, dividido entre los días cubiertos (sin contar dos veces los días en que hubo dos lotes abiertos).
-  Necesita al menos 3 días de datos; mientras no los haya usa `plannedPerDay` (p. ej. croquetas: 143 g/día).
-- En los productos **pasivos** (arroz, azúcar, líquidos de uso) la cantidad **baja sola** entre revisiones según ese
-  ritmo (`estimate()`); al revisar se corrige con el dato real.
-- Con el ritmo se proyecta cuántos días quedan (`daysLeft`) y qué día se acaba (`runsOutOn`).
+| Forma | Dónde | Qué guarda |
+|---|---|---|
+| Botones rápidos | Panel del mueble → **Usé**: ¼ · ½ · 1 · 2 · 3 tazas (o los botones del producto) | un `use` con `qty` y `measureId` |
+| Cantidad libre | Panel del mueble → **Otra cantidad**: número + unidad («2,5 tazas», «150 g») | igual, con la equivalencia en gramos |
+| Una cocinada | Botón **Cociné** de la cocina: varios ingredientes con su cantidad y una nota opcional («Almuerzo: arroz con pollo») | un `use` por ingrediente con `source: 'cocina'`, en un solo guardado |
+| Revisión | **Revisé, queda** Lleno · ¾ · ½ · ¼ · casi nada (en el arroz y el azúcar, se aplica al costal) | un `check` |
+| Frasco | **Rellené el frasco · quedaba** | un `transfer` |
+
+Antes, el arroz y el azúcar no tenían botones de **Usé** (solo «Revisé el costal»); ahora sí.
+
+### Cómo se aprende el ritmo (`learnPattern()` en `lib/lots.ts`)
+
+1. **Serie diaria.** Lo que bajó un lote entre dos observaciones se reparte en los días transcurridos (desde que el
+   lote se abrió, no desde que se compró). Las bajadas marcadas como trasvase o descarte no son consumo y esos días no
+   cuentan como observados. Ventana: 90 días; hacen falta 3 días con datos.
+2. **Ritmo que se adapta.** Promedio ponderado con *vida media de 14 días*: lo de hace dos semanas pesa la mitad que
+   lo de hoy, así un cambio de hábito se nota pronto.
+3. **Patrón semanal.** Con 28 días o más de datos (y al menos 3 de cada día de la semana) se aprende un factor por
+   día: si los domingos se cocina el doble de arroz, el domingo pesa ~1,75 y el resto ~0,9.
+4. **Proyección.** `projectDays()` simula día a día (ritmo × factor del día) hasta que el stock llega a cero: de ahí
+   salen «alcanza ~N días» y «se acaba el …». Sin datos se usa `plannedPerDay` (croquetas: 143 g/día).
+
+**Lo que baja solo.** En los productos pasivos (arroz, azúcar, líquidos de uso) la cantidad baja sola durante los
+**días completos sin ningún registro** (ni el día del último registro ni hoy, que aún puede anotarse), y solo en el
+lote que se está usando: un costal cerrado no baja. Un uso anotado parte de esa cantidad estimada; si un lote ya se
+estimaba vacío, se cierra y se sigue con el siguiente. Así, quien anota cada uso no ve descuentos dobles, y quien no
+anota igual ve una estimación razonable.
 
 ### Ejemplos con los datos de la casa
 
@@ -402,32 +422,20 @@ descuentan del frasco; cuando se vacía, la app sabe cuánto duró y propone rel
 | Azúcar | frasco de 2 tazas (400 g) dura «un poco más de una semana» (~8–9 días) | **≈ 45–50 g/día** | costal de 10 kg ≈ 7 meses |
 | Croquetas | previsto 143 g/día entre Monchi y Mandy | 143 g/día | costal de 9 kg ≈ 63 días |
 
-### Estructura propuesta: consumo variable
-
-El consumo no es constante («hay días que es más o menos»). La estructura lo cubre en tres capas:
-
-1. **Registrar lo real con su origen.** Cada uso es un movimiento con `qty` + `measureId` + `source`
-   (`manual`, `voz`, `ia`, `receta`, `auto`). Cocinar una receta del plan genera un movimiento por ingrediente con
-   `mealId`, en un solo lote de escritura.
-2. **Aprender un ritmo que se adapta.** Sobre la serie diaria de usos:
-   - *media móvil exponencial* (vida media de 14 días): pesa más lo reciente, así un cambio de hábito se nota en
-     pocas semanas;
-   - *factor por día de la semana* cuando hay 4+ semanas de datos (p. ej. el domingo se cocina más arroz);
-   - el resultado se guarda en `stats/{productId}` como caché, recalculable desde `movements`.
-3. **Proyectar con lo planificado.** Para los próximos días se usa, en este orden: lo programado en el plan de
-   comidas → el ritmo aprendido × factor del día → `plannedPerDay`. La proyección simula día a día hasta que el
-   stock llega a cero, así la fecha «se acaba el…» refleja las recetas elegidas para el mes.
+**Pendiente (función 6):** cuando exista el plan de comidas, la proyección usará primero lo programado para cada
+día y solo después el ritmo aprendido, y cocinar una receta del plan guardará su `mealId`.
 
 ```mermaid
 flowchart LR
-  A["Uso real<br/>manual · voz · IA · receta"] --> M[("movements")]
-  M --> S["Serie diaria por producto"]
-  S --> R["Ritmo EWMA<br/>+ factor semanal"]
-  R --> ST[("stats/{productId}")]
-  P["Plan de comidas"] --> PR
-  ST --> PR["Proyección día a día"]
-  L[("lots: stock actual")] --> PR
-  PR --> O["Se acaba el …<br/>lista de compras<br/>barra de vida"]
+  A["Usé · Otra cantidad · Cociné<br/>(luego: voz · IA · receta)"] --> L[("lots: checks")]
+  A --> M[("movements: qty · measureId · source")]
+  F["Rellené el frasco"] --> L
+  L --> S["Serie diaria<br/>sin trasvases ni descartes"]
+  S --> R["Ritmo con vida media 14 días<br/>+ factor semanal"]
+  P["Plan de comidas (función 6)"] -.-> PR
+  R --> PR["Proyección día a día"]
+  L --> PR
+  PR --> O["Alcanza ~N días · se acaba el …<br/>lista de compras · barra de vida"]
 ```
 
 ---
@@ -528,12 +536,14 @@ stateDiagram-v2
 |---|---|---|---|
 | 1 | El catálogo (160 insumos, 63 muebles) está en el código. | Agregar o ajustar un insumo exige desplegar. | Sembrar `products` desde `lib/catalog.ts` una vez; el código queda como semilla. |
 | 2 | `subscribeLots` escucha **toda** la colección `lots`, incluidos los cerrados. | Crece sin límite: cada mes hay más lecturas y más memoria. | Escuchar solo lotes abiertos (`closedAt == null`) y leer los cerrados de los últimos 90 días solo para aprender. |
-| 3 | `checks[]` crece con cada uso dentro del lote. | Documentos cada vez más pesados (un costal de arroz con usos diarios). | Guardar en el lote solo las últimas ~60 observaciones; el historial completo ya está en `movements`. |
+| 3 | `checks[]` crecía con cada uso dentro del lote. | Documentos cada vez más pesados (un costal de arroz con usos diarios). | ✅ Hecho: el lote guarda las últimas 120 observaciones (unos 4 meses de uso diario); el historial completo sigue en `movements`. |
 | 4 | Integrantes en el código (`family`). | Agregar a alguien exige desplegar. | Colección `users` administrada por Amy (función 5 de la hoja de ruta). |
 | 5 | Las reglas solo exigen `request.auth != null`, y cada dispositivo abre una **sesión anónima** automáticamente. El PIN se valida en el navegador. | Cualquiera que abra la URL puede leer y escribir el inventario, aunque no sepa un PIN. | Validar el PIN en el servidor (Cloud Function) y marcar la sesión con un *custom claim* (`member`/`admin`); exigir ese claim en las reglas. Activar App Check. |
 | 6 | Colecciones en la raíz. | Si un día hay otra casa, sus datos se mezclan. | Prefijo `households/{casaId}/…` cuando haga falta (la capa `db.ts` es la única que cambia). |
 | 7 | Paraguas solo en memoria. | Se pierden al recargar. | Colección `loans`. |
-| 8 | `discard` cierra el lote agregando una observación en 0, y `learnRate()` la toma como consumo. | Tirar un yogur vencido acelera el ritmo aprendido y adelanta «se acaba el…». | Que el ritmo ignore la caída de un lote descartado (marcar la observación como `discard` o calcular el ritmo desde `movements` de tipo `use`/`check`). Se resuelve con la función 2. |
+| 8 | `discard` cerraba el lote con una observación en 0 que `learnRate()` tomaba como consumo. | Tirar un yogur vencido aceleraba el ritmo aprendido y adelantaba «se acaba el…». | ✅ Hecho: la observación queda marcada como `discard` y no cuenta como consumo. |
+| 9 | En los productos pasivos, **todos** los lotes activos bajaban solos, también un costal cerrado. | El arroz mostraba 45,7 kg cuando había un costal de 48 kg sin abrir. | ✅ Hecho: solo baja el lote que se está usando. |
+| 10 | Un uso se descontaba de la última cantidad guardada y no de la estimada. | Anotar un uso tras días sin registros «devolvía» lo consumido y el total subía. | ✅ Hecho: el uso parte de lo estimado; ver la sección 6. |
 
 **Corregido en este cambio:** el historial descartaba al leer de Firestore los movimientos `discard` (lote que se
 malogró) y `loan`, porque no estaban en la lista de tipos válidos de `lib/db.ts`. Ahora aparecen en el post-it
@@ -548,7 +558,7 @@ Orden acordado; cada paso se apoya en la estructura de este documento.
 | # | Función | Qué agrega a la estructura |
 |---|---|---|
 | 1 | **Arquitectura del inventario** (este documento) | Modelo, diagramas, reglas de cálculo. |
-| 2 | **Consumos variables** (arroz, azúcar, cocinar) | `measures`, `transfer`, movimientos con `qty`/`measureId`/`source`, ritmo EWMA + factor semanal. |
+| 2 | ✅ **Consumos variables** (arroz, azúcar, cocinar) | `productSettings` (medidas y frasco), `transfer`, botón «Cociné», movimientos con `qty`/`measureId`/`source`, ritmo con vida media + factor semanal. |
 | 3 | **Pagos de servicios** (nuevo ícono) | `services`, `bills`, `billPayments`: monto, fecha, quién pagó, vencimiento con aviso, historial y gasto por mes. |
 | 4 | **Post-its del mural** | «Quién pagó» (lee `bills`) y calendario familiar (`events` con repetición y fechas especiales: Día del Padre, de la Madre, del Ingeniero, del Niño, del Informático, del Agrónomo, del Fotógrafo…). |
 | 5 | **Gestión de usuarios** (solo admin) | `users` como fuente de la llave familiar; altas, cambios y bajas suaves. |

@@ -1,6 +1,6 @@
 import { ensureSession } from './auth'
 import { firebaseConfigured, getFirebaseApp } from './firebase'
-import type { Article } from './catalog'
+import type { Article, Measure, ProductSettings } from './catalog'
 import type { Hamper } from './hampers'
 import type { HistoryEntry, Lot, Movement, MovementKind } from './lots'
 
@@ -12,6 +12,7 @@ import type { HistoryEntry, Lot, Movement, MovementKind } from './lots'
    - products/{id}             → productos nuevos creados por la familia (con sus reglas ya copiadas); `deletedAt` = archivado
    - hampers/{id}              → nivel de llenura de cada canasta de ropa sucia (mama, nosotras, hermanos)
    - petTracker/{YYYY-MM-DD}   → { entries: { "Gata:Turno": { by, at } } }, un documento por día
+   - productSettings/{id}      → medidas de cocina y frasco que la familia ajusta (taza = 190 g, frasco = 400 g)
    (users/ guarda los PIN.) */
 
 export type FeedingEntry = { by: string; at: string }
@@ -45,11 +46,13 @@ function parseLot(id: string, data: Record<string, unknown>): Lot | null {
   const initial = num(data.initial)
   const amount = num(data.amount)
   if (!articleId || !boughtAt || initial === null || amount === null) return null
-  const checks = Array.isArray(data.checks)
+  const checks: Lot['checks'] = Array.isArray(data.checks)
     ? data.checks.flatMap((entry) => {
         const at = str((entry as Record<string, unknown>)?.at)
         const value = num((entry as Record<string, unknown>)?.amount)
-        return at && value !== null ? [{ at, amount: value }] : []
+        const kind = (entry as Record<string, unknown>)?.kind
+        if (!at || value === null) return []
+        return kind === 'transfer' || kind === 'discard' ? [{ at, amount: value, kind }] : [{ at, amount: value }]
       })
     : []
   return {
@@ -67,6 +70,7 @@ function parseLot(id: string, data: Record<string, unknown>): Lot | null {
     by: str(data.by) ?? '',
     deletedAt: str(data.deletedAt),
     ripe: parseRipe(data.ripe),
+    parentLotId: str(data.parentLotId),
   }
 }
 
@@ -140,7 +144,19 @@ export async function saveLots(changed: Lot[], movements: Movement[], by: string
 
 function movementDoc(fs: typeof import('firebase/firestore'), movement: Movement, by: string) {
   // Firestore no acepta `undefined`: el detalle solo se guarda si existe.
-  return { articleId: movement.articleId, lotId: movement.lotId, kind: movement.kind, amount: movement.amount, ...(movement.detail ? { detail: movement.detail } : {}), by, at: fs.serverTimestamp(), day: dayKey() }
+  return {
+    articleId: movement.articleId,
+    lotId: movement.lotId,
+    kind: movement.kind,
+    amount: movement.amount,
+    ...(movement.detail ? { detail: movement.detail } : {}),
+    ...(movement.qty !== undefined ? { qty: movement.qty } : {}),
+    ...(movement.measureId ? { measureId: movement.measureId } : {}),
+    ...(movement.source ? { source: movement.source } : {}),
+    by,
+    at: fs.serverTimestamp(),
+    day: dayKey(),
+  }
 }
 
 /** Registra movimientos que no cambian lotes (p. ej. las canastas de ropa sucia). */
@@ -153,7 +169,7 @@ export async function saveMovements(movements: Movement[], by: string) {
 }
 
 // Debe incluir todos los tipos de MovementKind: el que falte se descarta al leer el historial de Firestore.
-const KINDS: MovementKind[] = ['create', 'buy', 'use', 'check', 'finish', 'discard', 'edit', 'delete', 'restore', 'hamper', 'loan']
+const KINDS: MovementKind[] = ['create', 'buy', 'use', 'check', 'transfer', 'finish', 'discard', 'edit', 'delete', 'restore', 'hamper', 'loan']
 
 /** Escucha en vivo los últimos movimientos (el historial unificado). */
 export function subscribeHistory(onData: (entries: HistoryEntry[]) => void, onError: OnError, max = 200): () => void {
@@ -340,5 +356,69 @@ export async function saveCatalogChange(change: { products: Article[]; lots: Lot
   for (const product of change.products) batch.set(fs.doc(db, 'products', product.id), { ...JSON.parse(JSON.stringify(product)), updatedBy: by, updatedAtServer: fs.serverTimestamp() })
   for (const lot of change.lots) batch.set(fs.doc(db, 'lots', lot.id), { ...lot, updatedAt: fs.serverTimestamp() })
   for (const movement of change.movements) batch.set(fs.doc(fs.collection(db, 'movements')), movementDoc(fs, movement, by))
+  await batch.commit()
+}
+
+/* ------------------------------ medidas y frasco ------------------------------ */
+
+function parseMeasures(value: unknown): Measure[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const list = value.flatMap((entry) => {
+    const data = entry as Record<string, unknown>
+    const id = str(data?.id)
+    const amount = num(data?.amount)
+    const label = data?.label
+    return id && amount !== null && amount > 0 && Array.isArray(label) && label.length === 2 ? [{ id, amount, label: [String(label[0]), String(label[1])] as [string, string] }] : []
+  })
+  return list.length ? list : undefined
+}
+
+function parseSettings(data: Record<string, unknown>): ProductSettings {
+  const settings: ProductSettings = {}
+  const measures = parseMeasures(data.measures)
+  if (measures) settings.measures = measures
+  if (data.container === null) settings.container = null
+  else if (data.container && typeof data.container === 'object') {
+    const container = data.container as Record<string, unknown>
+    const label = str(container.label)
+    const amount = num(container.amount)
+    if (label && amount !== null && amount > 0) settings.container = { label, amount }
+  }
+  return settings
+}
+
+/** Escucha en vivo los ajustes de medidas y frascos de cada producto. */
+export function subscribeSettings(onData: (settings: Record<string, ProductSettings>) => void, onError: OnError): () => void {
+  if (!firebaseConfigured) return () => {}
+  let cancelled = false
+  let unsubscribe = () => {}
+  connect()
+    .then(({ fs, db }) => {
+      if (cancelled) return
+      unsubscribe = fs.onSnapshot(
+        fs.collection(db, 'productSettings'),
+        (snapshot) => {
+          const all: Record<string, ProductSettings> = {}
+          snapshot.forEach((entry) => {
+            all[entry.id] = parseSettings(entry.data())
+          })
+          onData(all)
+        },
+        onError,
+      )
+    })
+    .catch(onError)
+  return () => {
+    cancelled = true
+    unsubscribe()
+  }
+}
+
+/** Guarda los ajustes de un producto y deja constancia en el historial. */
+export async function saveSettings(articleId: string, settings: ProductSettings, movements: Movement[], by: string) {
+  const { fs, db } = await connect()
+  const batch = fs.writeBatch(db)
+  batch.set(fs.doc(db, 'productSettings', articleId), { ...JSON.parse(JSON.stringify(settings)), ...(settings.container === null ? { container: null } : {}), updatedBy: by, updatedAt: fs.serverTimestamp() })
+  for (const movement of movements) batch.set(fs.doc(fs.collection(db, 'movements')), movementDoc(fs, movement, by))
   await batch.commit()
 }

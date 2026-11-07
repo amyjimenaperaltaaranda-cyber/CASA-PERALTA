@@ -1,7 +1,7 @@
 'use client'
 
 import { motion } from 'framer-motion'
-import { History, Pencil, Plus, RotateCcw, Shirt, SquareCheck, Trash2, Umbrella, Utensils, X } from 'lucide-react'
+import { History, Pencil, Plus, Repeat, RotateCcw, Shirt, SquareCheck, Trash2, Umbrella, Utensils, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useGame } from '@/components/game/game-provider'
 import { Modal } from '@/components/ui/modal'
@@ -19,6 +19,7 @@ const KIND: Record<MovementKind, { label: string; icon: typeof Plus; tone: strin
   restore: { label: 'Restaurado', icon: RotateCcw, tone: 'text-hud-ok' },
   use: { label: 'Uso', icon: Utensils, tone: 'text-hud-muted' },
   check: { label: 'Revisión', icon: SquareCheck, tone: 'text-hud-muted' },
+  transfer: { label: 'Frasco rellenado', icon: Repeat, tone: 'text-hud-muted' },
   finish: { label: 'Agotado', icon: SquareCheck, tone: 'text-hud-danger' },
   discard: { label: 'Descartado', icon: Trash2, tone: 'text-hud-danger' },
   hamper: { label: 'Ropa sucia', icon: Shirt, tone: 'text-hud-muted' },
@@ -30,7 +31,7 @@ const FILTERS = [
   { id: 'create', label: 'Creados', kinds: ['create', 'buy', 'restore'] },
   { id: 'edit', label: 'Editados', kinds: ['edit'] },
   { id: 'delete', label: 'Borrados', kinds: ['delete'] },
-  { id: 'use', label: 'Uso y revisión', kinds: ['use', 'check', 'finish', 'discard', 'hamper', 'loan'] },
+  { id: 'use', label: 'Uso y revisión', kinds: ['use', 'check', 'transfer', 'finish', 'discard', 'hamper', 'loan'] },
 ] as const
 
 function nameOf(entry: HistoryEntry) {

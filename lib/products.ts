@@ -1,4 +1,4 @@
-import { type Article, articleById, articles, shelves, syncCustomArticles } from './catalog'
+import { type Article, articleById, articles, containerOf, formatAmount, measuresOf, type ProductSettings, shelves, syncCustomArticles } from './catalog'
 import { applyLotAction, type Lot, type LotAction, type Movement } from './lots'
 
 /* Productos creados por el usuario: crear, editar (nombre / mueble) y archivar con borrado suave.
@@ -80,4 +80,33 @@ export function applyProductAction(products: Article[], archived: Article[], lot
   const nextArchived = archived.filter((entry) => entry.id !== back.id)
   syncCustomArticles(nextProducts, nextArchived)
   return { ...same, products: nextProducts, archived: nextArchived, changedProducts: [restored], movements: [{ articleId: back.id, lotId: '', kind: 'restore', amount: 0, detail: `Producto restaurado: ${back.name}` }], message: `${back.name}: producto restaurado` }
+}
+
+/* ------------------------------ medidas y frasco ------------------------------ */
+
+export type SettingsAction = { type: 'setProductSettings'; articleId: string; settings: ProductSettings }
+
+/** Cambia las medidas o el frasco de un producto y deja constancia de qué cambió. */
+export function applySettings(all: Record<string, ProductSettings>, action: SettingsAction): { settings: Record<string, ProductSettings>; movements: Movement[]; message: string } {
+  const article = articleById(action.articleId)
+  if (!article) return { settings: all, movements: [], message: '' }
+  const before = { measures: measuresOf(article, all[article.id]), container: containerOf(article, all[article.id]) }
+  const after = { measures: measuresOf(article, action.settings), container: containerOf(article, action.settings) }
+  const detail: string[] = []
+  const unit = (amount: number) => formatAmount(article, amount)
+  for (const next of after.measures) {
+    const prev = before.measures.find((entry) => entry.id === next.id)
+    if (!prev) detail.push(`Nueva medida: 1 ${next.label[0]} = ${unit(next.amount)}`)
+    else if (prev.amount !== next.amount || prev.label[0] !== next.label[0]) detail.push(`1 ${next.label[0]}: ${unit(prev.amount)} → ${unit(next.amount)}`)
+  }
+  for (const prev of before.measures) if (!after.measures.some((entry) => entry.id === prev.id)) detail.push(`Sin medida «${prev.label[0]}»`)
+  if (JSON.stringify(before.container) !== JSON.stringify(after.container)) {
+    detail.push(after.container ? `${after.container.label}: ${unit(after.container.amount)}` : 'Sin frasco')
+  }
+  if (detail.length === 0) return { settings: all, movements: [], message: '' }
+  return {
+    settings: { ...all, [article.id]: action.settings },
+    movements: [{ articleId: article.id, lotId: '', kind: 'edit', amount: 0, detail: `Medidas · ${detail.join(' · ')}` }],
+    message: `${article.name}: medidas guardadas`,
+  }
 }
